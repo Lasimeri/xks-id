@@ -1,23 +1,28 @@
-TITLE@one host: one Claude Code session; hooks registered in ~/.claude/settings.json
-┌─ decision model ─────┐@ weights          @┌─ xksid-distil (offline) ─────┐@@
-│ operator's pick, TBD │@─────────────────▶@│ token vectors F32 + head     │@@
+TITLE@one host: XKS-Memory records the harnesses, xksid reads what it recorded
+┌─ agent harnesses ────┐@ every turn       @┌─ XKS-Memory, unmodified ─────┐@@
+│ Claude Code, omp     │@─────────────────▶@│ its hooks and omp extension  │@@
+│                      │@@│ store each turn as one file  │@@
+└──────────────────────┘@@└──────────────┬───────────────┘@@
+RAW@{57}▼@
+RAW@{6}ROOT/HARNESS/SESSION/TIME_ROLE_SHA8.md, one file per turn: read by xksid, never written@
+┌─ decision model ─────┐@ llama.cpp        @┌─ xksid-distil (offline) ─────┐@@
+│ LiquidAI d1-2B BF16  │@─────────────────▶@│ token vectors F32 + head     │@@
 │ run offline, once    │@@│ written to dvec.f32          │@@
 └──────────────────────┘@@└──────────────┬───────────────┘@@
 RAW@{57}▼@
-┌─ untrusted inbound ──┐@ PostToolUse      @┌─ xksid scan ─────────────────┐@@┌─ ledger ───────┐
-│ web fetch, search,   │@ stdin JSON       @│ L0 normalise, decode <= 3    │@@│ append-only,   │
-│ file read, shell     │@─────────────────▶@│ L1 unicode    L2 structure   │@───▶@│ on disk:       │
-│ stdout, MCP tools    │@@│ L3 lexical    L4 anomaly     │@@│ taint atoms    │
-└──────────────────────┘@@│ L5 sinks      L6 dvec -> S   │@@│ trust atoms    │
-@@└──────────────┬───────────────┘@@│ T/S/E bits     │
-RAW@model context: rule id + offset + hash, no payload ◀─────┘@│ canary token   │
-┌─ trusted inbound ────┐@ UserPromptSubmit @┌─ xksid trust ────────────────┐@@│ alert log      │
-│ operator-typed text  │@─────────────────▶@│ atoms typed by the operator  │@───▶@│                │
-│ (pastes are scanned) │@@│ become the trusted set       │@@│                │
+┌─ tool_result files ──┐@ read-only        @┌─ content sensors ────────────┐@@┌─ ledger ───────┐
+│ untrusted: web, file,│@@│ L0 normalise, decode <= 3    │@@│ xksid's own,   │
+│ shell and MCP output │@─────────────────▶@│ L1 unicode    L2 structure   │@───▶@│ outside ROOT:  │
+│ up to 65,536 B each  │@@│ L3 lexical    L4 anomaly     │@@│ file cursor    │
+└──────────────────────┘@@│ L5 sinks      L6 dvec -> S   │@@│ taint atoms    │
+@@└──────────────────────────────┘@@│ trust atoms    │
+┌─ user files ─────────┐@ read-only        @┌─ trust set ──────────────────┐@@│ T/S/E bits     │
+│ operator-typed text  │@─────────────────▶@│ atoms typed by the operator  │@───▶@│ canary token   │
+│ (pastes are scanned) │@@│ become the trusted set       │@@│ alert log      │
 └──────────────────────┘@@└──────────────────────────────┘@@│                │
-┌─ model tool call ────┐@ PreToolUse       @┌─ xksid gate ─────────────────┐@@│                │
-│ shell, file write,   │@─────────────────▶@│ provenance   sensitivity     │@◀───@│                │
-│ network, MCP tools   │@@│ T and S and E   canary       │@@│                │
+┌─ tool_use files ─────┐@ read-only        @┌─ behaviour sensors ──────────┐@@│                │
+│ tool name and its    │@─────────────────▶@│ provenance   sensitivity     │@◀───@│                │
+│ rendered input       │@@│ T and S and E   canary       │@@│                │
 └──────────────────────┘@@└──────────────┬───────────────┘@@└────────────────┘
 RAW@{57}▼@
-RAW@{22}verdict as stdout JSON: allow | annotate | ask | deny. Kills nothing.@
+RAW@{14}alerts: session, turn file, rule ids, severity. xksid blocks nothing.@

@@ -2,6 +2,11 @@
 
 Status: design only. Nothing in this document has been built or measured. Thresholds are targets. Sizes are arithmetic from assumed shapes and are labelled as such.
 
+> **Being reworked.** This document was written for a deployment inside a single harness session, where the monitor ran as hooks and could refuse a tool call. The deployment has changed: `xks-id` now reads the turn files that XKS-Memory records for every harness, and it only reports. The README describes the current deployment and is authoritative where the two disagree.
+>
+> - **Still valid:** section 1 (problem), section 2 (architecture choice), section 4 (content sensors), the vector and head design of section 5, the sensors of section 6, section 8 (annotation hygiene, applied to the alert log), section 11 (evaluation).
+> - **Superseded:** the diagram and component table of section 3, the allow, ask and deny verdicts of section 7, the hook wiring of section 9, and the stage table of section 13. Section 5 says the distiller reads the weight file with its own forward pass; it drives llama.cpp instead.
+
 ## 1. Problem
 
 An agent harness feeds a language model two kinds of text:
