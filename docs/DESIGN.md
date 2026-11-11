@@ -114,5 +114,6 @@ Listed in the README and, per method, in [METHODS.md](METHODS.md). The structura
 | Kernels | `out/vec_test`, every length from 0 to 2,100 |
 | Hook output | Run from the command line against real alerts: one notice, then none |
 | Interface | Run in a pseudo-terminal with scripted keys |
+| Vector download | `make fetch-vectors` into an empty directory: the three files through the public URL in 354.72 s, all three checksums match, the engine loads them |
 
 Not verified: the hooks inside a running Claude Code or omp; `xksid watch` as a service over days; any hardware other than the machine above; an x86-64 CPU without AVX2 (the plain C path is tested only through the reference functions).
