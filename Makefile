@@ -4,6 +4,7 @@
 #   make out/xksid        the engine alone: needs a C compiler and nothing else
 #   make check            the tests
 #   make install          binaries to $(PREFIX)/bin, the service file to ~/.config/systemd/user
+#   make fetch-vectors    download the decision vectors (about 1 GB) to $(MODEL_DIR) and check them
 #   make install-vectors VECTORS=DIR
 #                         dvec.tok, dvec.vec.f32 and dvec.head from DIR to $(MODEL_DIR)
 #
@@ -18,6 +19,7 @@ CXXFLAGS  ?= -std=c++17 -O2 -Wall -Wextra -Wpedantic -Wshadow -Wconversion -Werr
 PREFIX    ?= $(HOME)/.local
 MODEL_DIR ?= $(HOME)/.local/share/xksid
 UNIT_DIR  ?= $(HOME)/.config/systemd/user
+VECTORS_URL ?= https://huggingface.co/Lasimeri/xks-id-vectors/resolve/main
 
 XKSID_SRC = src/xksid/xksid.c src/xksid/rules.c src/xksid/sha256.c src/xksid/tok.c src/xksid/vec.c
 XKSID_HDR = src/xksid/rules.h src/xksid/sha256.h src/xksid/tok.h src/xksid/vec.h
@@ -27,7 +29,7 @@ LLAMA_INC = -isystem $(LLAMA_DIR)/src -isystem $(LLAMA_DIR)/include -isystem $(L
             -isystem $(LLAMA_DIR)/common -isystem $(LLAMA_DIR)/vendor
 LLAMA_LIB = -L$(LLAMA_BUILD)/bin -lllama-common -lllama -lggml-base -Wl,-rpath,$(LLAMA_BUILD)/bin
 
-.PHONY: all tui check install install-vectors distil
+.PHONY: all tui check install fetch-vectors install-vectors distil
 all: out/xksid tui
 
 out/xksid: $(XKSID_SRC) $(XKSID_HDR)
@@ -55,6 +57,15 @@ install: all
 	install -m 755 $(TUI) $(PREFIX)/bin/xksid-tui
 	install -m 644 integrations/systemd/xksid.service $(UNIT_DIR)/xksid.service
 	@echo "installed. Nothing was started or enabled: docs/SETUP.md has the next steps."
+
+# An interrupted download continues where it stopped. The files are used only if all three
+# match docs/vectors.sha256.
+fetch-vectors:
+	install -d $(MODEL_DIR)
+	for f in dvec.tok dvec.head dvec.vec.f32; do \
+		curl --location --fail --continue-at - --output $(MODEL_DIR)/$$f $(VECTORS_URL)/$$f || exit 1; \
+	done
+	cd $(MODEL_DIR) && sha256sum --check $(CURDIR)/docs/vectors.sha256
 
 install-vectors:
 	@test -n "$(VECTORS)" || { echo "set VECTORS to the directory that holds dvec.tok, dvec.vec.f32 and dvec.head"; exit 1; }

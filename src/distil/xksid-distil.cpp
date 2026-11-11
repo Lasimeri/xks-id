@@ -21,6 +21,10 @@
 //   table MODEL QUESTION OUT FIRST LAST [WORKERS [CTX]]
 //                                         decision vectors of tokens [FIRST, LAST),
 //                                         WORKERS contexts on the one loaded model
+//   label MODEL QUESTION IN OUT WIDTH [WORKERS]
+//                                         the model's yes and no logits for windows of
+//                                         WIDTH token ids read from IN: the labels the
+//                                         head is fitted to (xksid-fit)
 //
 // QUESTION is a text file holding the instructions of the yes/no question.
 // The table mode writes OUT.vec.f32 (n_vocab rows of n_embd floats, row t at

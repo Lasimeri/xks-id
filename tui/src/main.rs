@@ -478,6 +478,7 @@ impl App {
                     "  q             quit",
                     "",
                     "  engine, all day:   systemctl --user enable --now xksid",
+                    "  decision vectors (about 1 GB, no GPU needed):   make fetch-vectors",
                     "  alert cut from your own turns:   xksid calibrate",
                     "  the model is told about flagged turns through the harness hooks: see docs/SETUP.md",
                 ] {

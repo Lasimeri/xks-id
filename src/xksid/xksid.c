@@ -8,10 +8,13 @@
 //                 highest decision-vector logit ("-" without the table)
 //   l6.cut        alert and evidence logits from "xksid calibrate"
 //   benign.f32    directions of windows marked as false positives
+//   suppressed.tsv  turns kept under the alert cut only by that feedback
+//   delivered.txt alerts the observed model has been told about ("xksid hook")
 //   seen.txt      the turn files already read, appended
 //   stats.tsv     counters, rewritten after every scan
 //   sessions.tsv  per session: turns, alerts, highest score, last turn
-// An alert never carries text from the turn: rule ids and an offset only.
+// No file of the state carries text from a turn: rule ids and offsets only.
+// The same holds for the notice the hook prints for the model.
 
 #define _GNU_SOURCE
 

@@ -10,7 +10,7 @@ The vector layer of `xks-id` runs on three files. This document says what they a
 | `dvec.vec.f32` | 1,048,576,000 B | 128,000 rows of 2,048 little-endian floats; row `t` is the decision vector of token `t` |
 | `dvec.head` | 16,412 B | The head: weights, bias, the model's temperature, the fitted cut, the mean direction of recorded text |
 
-They are not in this repository. They are derived from the model below and carry its licence.
+They are published at <https://huggingface.co/Lasimeri/xks-id-vectors>, not in this repository. `make fetch-vectors` downloads them and checks them against `docs/vectors.sha256`. They are derived from the model below and carry its licence, a copy of which is published with them, together with the per-token logits (`dvec.logit.f32`) and the question text.
 
 ## The model
 

@@ -65,7 +65,7 @@ On 10,172 recorded turns the rules alone take 1.187 s, 8,566 turns per second, w
 
 ## 6. The vector layer
 
-Optional. It needs three files: a tokenizer bundle, a table with one vector of 2,048 floats per vocabulary token, and a head. How they are made is in [VECTORS.md](VECTORS.md). At detection time there is no model.
+Optional. It needs three files: a tokenizer bundle, a table with one vector of 2,048 floats per vocabulary token, and a head. They are published (`make fetch-vectors`); how they were made is in [VECTORS.md](VECTORS.md). At detection time there is no model and no GPU, and neither is needed to calibrate the layer or to correct its false positives.
 
 1. **Tokenise** the turn with the model's own vocabulary: a byte-level BPE tokenizer in C that follows llama.cpp (the LLAMA3 split rule, whole pieces first, then merges by rank, user-defined tokens matched before anything else). On 4,015 recorded turns it produces the same 2,150,799 token ids as llama.cpp, with no difference.
 2. **Pool.** Tokens are taken in blocks of 16; a window is four blocks, so windows are 64 tokens and step by 16. Each token's row is added once into its block sum; a window is the sum of four block sums. The order of the additions is fixed, so the result does not vary.
