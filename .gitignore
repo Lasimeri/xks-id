@@ -1,0 +1,12 @@
+# Build products and measurement output
+/out/
+/build/
+
+# Model weights, evaluation corpora, session transcripts: never committed
+/input/
+*.f32
+*.safetensors
+*.gguf
+
+# Runtime state
+/ledger/
