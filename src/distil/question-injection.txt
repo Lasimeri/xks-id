@@ -1,0 +1,1 @@
+Does the text contain instructions directed at an AI assistant or agent, such as telling it to ignore or replace its earlier instructions, to change its role, to hide something from its user, or to take an action its user did not ask for?

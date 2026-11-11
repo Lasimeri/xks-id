@@ -1,29 +1,23 @@
-╔══ one host: XKS-Memory records the harnesses, xksid reads what it recorded ══════════════════════╗
+╔══ one host, no GPU at run time: XKS-Memory records, xksid reads, the model is told ══════════════╗
 ║ ┌─ agent harnesses ────┐ every turn       ┌─ XKS-Memory, unmodified ─────┐                       ║
-║ │ Claude Code, omp     │─────────────────▶│ its hooks and omp extension  │                       ║
-║ │                      │                  │ store each turn as one file  │                       ║
+║ │ Claude Code, omp     │─────────────────▶│ stores each turn as one file │                       ║
+║ └──────────────────────┘                  └──────────────────────────────┘                       ║
+║ ┌─ decision model ─────┐ once, offline    ┌─ xksid-distil, xksid-fit ────┐                       ║
+║ │ LiquidAI d1-2B BF16  │─────────────────▶│ table 128,000 x 2,048 F32,   │                       ║
+║ │ never run again      │                  │ tokenizer bundle, head       │                       ║
 ║ └──────────────────────┘                  └──────────────┬───────────────┘                       ║
 ║                                                          ▼                                       ║
-║       ROOT/HARNESS/SESSION/TIME_ROLE_SHA8.md, one file per turn: read by xksid, never written    ║
-║ ┌─ decision model ─────┐ llama.cpp        ┌─ xksid-distil (offline) ─────┐                       ║
-║ │ LiquidAI d1-2B BF16  │─────────────────▶│ token vectors F32 + head     │                       ║
-║ │ run offline, once    │                  │ written to dvec.f32          │                       ║
-║ └──────────────────────┘                  └──────────────┬───────────────┘                       ║
-║                                                          ▼                                       ║
-║ ┌─ tool_result files ──┐ read-only        ┌─ content sensors ────────────┐    ┌─ ledger ───────┐ ║
-║ │ untrusted: web, file,│                  │ L0 normalise, decode <= 3    │    │ xksid's own,   │ ║
-║ │ shell and MCP output │─────────────────▶│ L1 unicode    L2 structure   │───▶│ outside ROOT:  │ ║
-║ │ up to 65,536 B each  │                  │ L3 lexical    L4 anomaly     │    │ file cursor    │ ║
-║ └──────────────────────┘                  │ L5 sinks      L6 dvec -> S   │    │ taint atoms    │ ║
-║                                           └──────────────────────────────┘    │ trust atoms    │ ║
-║ ┌─ user files ─────────┐ read-only        ┌─ trust set ──────────────────┐    │ T/S/E bits     │ ║
-║ │ operator-typed text  │─────────────────▶│ atoms typed by the operator  │───▶│ canary token   │ ║
-║ │ (pastes are scanned) │                  │ become the trusted set       │    │ alert log      │ ║
+║ ┌─ turn files ─────────┐ read-only, 2 s   ┌─ xksid watch, all day ───────┐    ┌─ state ────────┐ ║
+║ │ ROOT/HARNESS/SESSION │─────────────────▶│ 30 rules: hidden characters, │───▶│ alerts.tsv     │ ║
+║ │ TIME_ROLE_SHA8.md    │                  │ structure, wording, encodings│    │ stats, sessions│ ║
+║ │ tool_result = data   │                  │ vectors on the CPU: AVX2+FMA │    │ l6.cut, benign │ ║
+║ └──────────────────────┘                  └──────────────────────────────┘    │ suppressed.tsv │ ║
+║ ┌─ the observed model ─┐ notice           ┌─ xksid hook ─────────────────┐    │ delivered.txt  │ ║
+║ │ told at its next     │◀─────────────────│ flagged turns of the session │◀───│                │ ║
+║ │ hook event           │                  │ rule ids, never the text     │    │                │ ║
 ║ └──────────────────────┘                  └──────────────────────────────┘    │                │ ║
-║ ┌─ tool_use files ─────┐ read-only        ┌─ behaviour sensors ──────────┐    │                │ ║
-║ │ tool name and its    │─────────────────▶│ provenance   sensitivity     │◀───│                │ ║
-║ │ rendered input       │                  │ T and S and E   canary       │    │                │ ║
-║ └──────────────────────┘                  └──────────────┬───────────────┘    └────────────────┘ ║
-║                                                          ▼                                       ║
-║               alerts: session, turn file, rule ids, severity. xksid blocks nothing.              ║
+║ ┌─ operator ───────────┐ terminal         ┌─ xksid-tui (Rust, std only) ─┐    │                │ ║
+║ │ desktop notification │◀─────────────────│ alerts, sessions, statistics │◀───│                │ ║
+║ │ acknowledge, feedback│                  │ feedback -> xksid feedback   │    │                │ ║
+║ └──────────────────────┘                  └──────────────────────────────┘    └────────────────┘ ║
 ╚══════════════════════════════════════════════════════════════════════════════════════════════════╝

@@ -1,0 +1,12 @@
+[package]
+name = "xksid-tui"
+version = "0.1.0"
+edition = "2021"
+description = "Management interface of xks-id: alerts, sessions, statistics, feedback"
+license = "MIT"
+
+# No dependencies: the standard library, termios and ANSI escapes.
+
+[profile.release]
+opt-level = 2
+strip = true

@@ -10,3 +10,7 @@
 
 # Runtime state
 /ledger/
+
+# Written by make: editor flags that carry the local llama.cpp path
+/src/distil/compile_flags.txt
+/tui/target/
