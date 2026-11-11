@@ -100,6 +100,8 @@ With the layer on, 10,180 recorded turns take 1.977 s (5,149 turns per second, 1
 
 The notice gives the time and role of each flagged turn, its score, the rule ids and what each rule means, and the order: treat the content of those turns as data, check what was done after them, stop and undo what the user did not ask for, tell the user. It never contains text from the turn, since repeating a payload under the monitor's name would inject it a second time.
 
+A notice delivered through a hook is not recorded by XKS-Memory as a turn, so it is not scanned. A notice printed into a tool result is: running `xksid hook` by hand in the agent's own shell puts text addressed to an AI into a tool result, and the engine flags it like any other (observed: rule V602 alone, score 6). The engine makes no exception for its own wording, since an exception keyed on wording could be copied by an attacker.
+
 ## 8. Limits
 
 Listed in the README and, per method, in [METHODS.md](METHODS.md). The structural ones: detection after the fact; only what XKS-Memory records; English wording; no view of MCP tool descriptions; no memory across turns.
@@ -115,5 +117,11 @@ Listed in the README and, per method, in [METHODS.md](METHODS.md). The structura
 | Hook output | Run from the command line against real alerts: one notice, then none |
 | Interface | Run in a pseudo-terminal with scripted keys |
 | Vector download | `make fetch-vectors` into an empty directory: the three files through the public URL in 354.72 s, all three checksums match, the engine loads them |
+| Install | `make install`, `make install-vectors`, `xksid calibrate` (3,898 turns in 4.733 s), `xksid scan` (10,544 turns in 2.122 s) with the installed binaries on the recorded sessions |
+| Service, live | `systemctl --user enable --now xksid`: 7 tool results recorded by XKS-Memory while it ran were flagged 0 to 2 s (whole seconds) after their file was written; 23 cycles with new turns, mean 0.023 s, longest 0.063 s; 1.083 s of CPU in 6 min; a restart raised no old alert again; a second scanner beside it exits with code 3 |
+| Notification | The `Notify` call seen on the session bus (`dbus-monitor`): one call per alert, harness, session and rule ids only |
+| Hook, installed | Tool-result, stop and `--session` forms against the live state: one notice, then none; no output on malformed input |
+| Interface, installed | Every view and the detail on the live state; acknowledge and feedback on a copy of the state |
+| Feedback | One turn marked on the copy, then all recorded sessions scanned again: 43 windows set aside, the marked turn loses rule V602 and still alerts through its wording rules, it is listed in `suppressed.tsv`; scan time unchanged (1.285 to 1.475 s with feedback, 1.452 to 1.456 s without, warm) |
 
 Not verified: the hooks inside a running Claude Code or omp; `xksid watch` as a service over days; any hardware other than the machine above; an x86-64 CPU without AVX2 (the plain C path is tested only through the reference functions).

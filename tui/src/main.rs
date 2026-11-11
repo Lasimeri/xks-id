@@ -416,7 +416,10 @@ impl App {
                     }
                     out.push("-".repeat(width));
                     out.push(format!(" session  {}", a.session));
-                    out.push(format!(" turn     {}   byte {}", a.file, a.offset));
+                    // A turn flagged by the decision vectors alone has no byte position: its
+                    // offset is negative, and the text is shown from the start of the turn.
+                    let position = if a.offset < 0 { "shown from the start".to_string() } else { format!("byte {}", a.offset) };
+                    out.push(format!(" turn     {}   {}", a.file, position));
                     for id in a.rules.split(',') {
                         let (weight, text) = self.rules.get(id).cloned().unwrap_or_default();
                         out.push(format!(" {id}  +{weight}  {text}"));

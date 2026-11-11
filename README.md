@@ -57,7 +57,7 @@ Built and tested. Numbers are from one machine (Ryzen 7 5800X, RTX 3090 Ti used 
 Not verified yet, and stated as such:
 
 - **The harness hooks inside a live harness.** `xksid hook` is tested from the command line against real alerts. The Claude Code hook block and the omp extension have not been run inside those programs.
-- **The service over days.** `xksid watch` has been run for single scans, not as a long-lived service.
+- **The service over days.** Installed as the systemd user service, the engine flagged 7 tool results recorded live, each within 3 s of XKS-Memory writing the file, sent the desktop notification, and raised nothing twice after a restart. That was minutes of running, not days.
 - **The vector head alone is weak at low false-alarm rates** (9.9 % at 1 plain window in 500). It is used as evidence beside the rules and alerts by itself only above a cut calibrated on the operator's own turns.
 
 ## Quick start
