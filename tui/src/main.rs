@@ -314,7 +314,14 @@ impl App {
         self.suppressed = rows(self.paths.state.join("suppressed.tsv"));
         self.acked = fs::read_to_string(self.paths.state.join("acked.txt")).unwrap_or_default().lines().map(str::to_string).collect();
         self.stats = rows(self.paths.state.join("stats.tsv")).into_iter().filter(|f| f.len() == 2).map(|f| (f[0].clone(), f[1].parse().unwrap_or(0))).collect();
-        self.status = self.run(&["status"]).1.lines().take(9).map(str::to_string).collect();
+        // "xksid status" prints its own lines first, then the counters; a counter's key has a dot.
+        self.status = self
+            .run(&["status"])
+            .1
+            .lines()
+            .take_while(|l| !l.split('\t').next().unwrap_or("").contains('.'))
+            .map(str::to_string)
+            .collect();
         self.engine = self.engine_running();
         self.stamp = self.file_stamp();
         if !first && self.alerts.len() > before {
@@ -482,7 +489,7 @@ impl App {
                     "",
                     "  engine, all day:   systemctl --user enable --now xksid",
                     "  decision vectors (about 1 GB, no GPU needed):   make fetch-vectors",
-                    "  alert cut from your own turns:   xksid calibrate",
+                    "  the alert cut follows your own turns by itself; xksid calibrate builds it again and shows it",
                     "  the model is told about flagged turns through the harness hooks: see docs/SETUP.md",
                 ] {
                     out.push(line.to_string());

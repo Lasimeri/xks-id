@@ -76,7 +76,7 @@ Three files in `~/.local/share/xksid`: `dvec.tok`, `dvec.vec.f32`, `dvec.head`. 
 ```
 make fetch-vectors      # about 1 GB from huggingface.co/Lasimeri/xks-id-vectors, checked against docs/vectors.sha256
 xksid status            # decision vectors: on, kernel avx2+fma
-xksid calibrate
+systemctl --user restart xksid   # only if the service was already running: it loads the vectors when it starts
 ```
 
 `make fetch-vectors` uses curl and continues an interrupted download. By hand, the same three files can be taken from <https://huggingface.co/Lasimeri/xks-id-vectors> and checked with `sha256sum --check docs/vectors.sha256` inside the directory that holds them. Files built yourself ([VECTORS.md](VECTORS.md)) are installed with `make install-vectors VECTORS=DIR`.
@@ -85,7 +85,12 @@ The vectors are derived from LiquidAI d1-2B and come under that model's licence,
 
 The table is mapped, not loaded: the engine's memory grows with the rows it touches (213 MB peak on 10,180 recorded turns).
 
-`xksid calibrate` scores your own recorded tool output and sets the alert cut where 1 turn in 1,000 of that history lies above it, and the evidence line where 1 in 50 does. It prints the highest turns of your history: look at them. No GPU and no model are involved; a history of 3,760 turns takes about 5 seconds.
+**Calibration is automatic.** The engine keeps the vector score of every tool result it reads and takes two levels from the most recent 8,192 of them: the alert cut, where 1 turn in 1,000 lies above it, and the evidence line, where 1 in 50 does. Both follow your own work as it changes; `xksid status` and the Statistics view show them and when the cut last moved, and every move is logged in `cut.tsv` in the state directory. No GPU and no model are involved.
+
+- When the engine starts with vectors and no calibration, it builds one from the turns it has already read (3,838 turns in 5.1 s on a cold file cache, 1.1 to 1.9 s warm).
+- Until 1,000 tool results have been scored the cut is the highest score seen so far, so each new record alerts once: on the recorded history used here that was 5 alerts.
+- A turn above the cut can move the cut once per session. Text that keeps arriving in one session keeps alerting.
+- `xksid calibrate` builds the calibration again from the turns the engine has read and prints what it holds, including the highest turns of your history: look at them. It is never needed for the engine to work.
 
 The kernels use AVX2 and FMA3 when the CPU has both and plain C otherwise.
 
@@ -94,7 +99,7 @@ The kernels use AVX2 and FMA3 when the CPU has both and plain C otherwise.
 - **A rule alert that is not a problem:** acknowledge it (`a`). The rules are not changed by feedback.
 - **A vector alert that is not a problem:** `f` in the interface, or `xksid feedback HARNESS/SESSION/FILE`. The directions of that turn's windows are stored, and later windows that point the same way no longer count for the vectors. A turn held under the cut this way is listed under Suppressed with the score it had, so nothing disappears unseen. To undo all feedback, remove `benign.f32` from the state directory.
 
-A marked turn can still alert through the rules.
+A marked turn can still alert through the rules. Feedback takes effect at the engine's next cycle, without a restart: the running engine sees the change and builds its calibration again with it.
 
 ## 8. Remove
 

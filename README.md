@@ -53,12 +53,21 @@ Built and tested. Numbers are from one machine (Ryzen 7 5800X, RTX 3090 Ti used 
 | Tokenizer against llama.cpp | 4,015 of 4,015 recorded turns identical, 2,150,799 tokens |
 | AVX2 + FMA3 kernels against plain C | add 7.17x, dot product 23.31x in cache; 1.91x on table rows, where memory is the limit |
 | Vector head against the model, unseen phrasings | AUC 0.9103; at 1 plain window in 100 flagged it catches 53.3 % of the model's yes windows |
+| Automatic calibration | The calibration built while reading 10,781 recorded turns is byte-identical to one built again from scratch; a cycle with nothing new takes 0.003 s |
 
 Not verified yet, and stated as such:
 
 - **The harness hooks inside a live harness.** `xksid hook` is tested from the command line against real alerts. The Claude Code hook block and the omp extension have not been run inside those programs.
-- **The service over days.** Installed as the systemd user service, the engine flagged 7 tool results recorded live, each within 3 s of XKS-Memory writing the file, sent the desktop notification, and raised nothing twice after a restart. That was minutes of running, not days.
-- **The vector head alone is weak at low false-alarm rates** (9.9 % at 1 plain window in 500). It is used as evidence beside the rules and alerts by itself only above a cut calibrated on the operator's own turns.
+- **The service over days.** Installed as the systemd user service, the engine flagged 7 tool results recorded live, each within 3 s of XKS-Memory writing the file, sent the desktop notification, and raised nothing twice after a restart. Its longest run so far is 11 h 53 min (1 min 45.7 s of CPU, 38.8 MB peak), not days.
+- **The vector head alone is weak at low false-alarm rates** (9.9 % at 1 plain window in 500). It is used as evidence beside the rules and alerts by itself only above a cut that the engine keeps calibrated on the operator's own turns.
+
+## What adapts and what does not
+
+- **The rules do not change.** The thirty rules and their weights are the same on every machine and on every day.
+- **The alert cut of the vectors follows your own tool output, by itself.** The engine keeps the score of each tool result it reads and sets the cut where 1 in 1,000 of the most recent 8,192 lies above it. There is no command to run. A turn is judged before it is added, and a turn the rules already flag is never added.
+- **Flagged text cannot quietly teach the cut.** A turn above the cut may move it once per session; every further one of that session alerts and leaves the cut where it is. In a test on recorded sessions, ten such turns in one session gave ten alerts. Text that returns in several separate sessions is learned: with about 4,000 turns recorded, the third session that brought it was the last to alert.
+- **Your feedback is picked up while the engine runs.** A turn marked as a false positive takes effect at the next cycle, without a restart.
+- **It does not learn new attacks.** Wording that the rules and the vectors miss today is missed until the rules or the vectors are changed.
 
 ## Quick start
 
@@ -68,8 +77,7 @@ make && make check
 make install                          # xksid, xksid-tui and the service file; starts nothing
 xksid scan                            # first pass over everything XKS-Memory has recorded
 make fetch-vectors                    # optional: the decision vectors, about 1 GB, checked by SHA-256
-xksid calibrate                       # with the vectors: the alert cut from your own recorded turns
-systemctl --user enable --now xksid   # the engine, all day
+systemctl --user enable --now xksid   # the engine, all day; it calibrates the vectors on your own turns by itself
 xksid-tui
 ```
 

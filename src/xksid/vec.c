@@ -307,7 +307,10 @@ double xv_score(const xv_table *t, const xv_head *h, const xv_exemplars *benign,
     const size_t d = (size_t) t->dim;
     *at     = 0;
     *vetoed = 0;
-    if (n == 0 || h->dim != t->dim) {
+    // A text of a few tokens is not a window: its pooled vector is nearly one token's own
+    // vector, which the head was never fitted to. On recorded tool output 47.2 % of the texts
+    // under 8 tokens scored as evidence, against 0.0 to 1.1 % of every longer class.
+    if (n < XV_BLOCK || h->dim != t->dim) {
         return XV_NO_SCORE;
     }
     const size_t n_blocks = (n + XV_BLOCK - 1) / XV_BLOCK, per = XV_WINDOW / XV_BLOCK;

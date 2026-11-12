@@ -75,7 +75,8 @@ void xv_window_unit(const xv_table *t, const int32_t *ids, size_t n, size_t at, 
 
 // Scores every window of the ids. Returns the highest logit, XV_NO_SCORE if no window counts;
 // *at is the index of the first token of that window, *vetoed the number of windows set aside
-// by benign exemplars (benign may be NULL). A text shorter than a window is one window.
+// by benign exemplars (benign may be NULL). A text shorter than a window is one window; a
+// text shorter than one block is not scored.
 double xv_score(const xv_table *t, const xv_head *h, const xv_exemplars *benign, const int32_t *ids, size_t n, size_t *at, size_t *vetoed);
 
 #endif

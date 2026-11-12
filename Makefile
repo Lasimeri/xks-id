@@ -21,8 +21,8 @@ MODEL_DIR ?= $(HOME)/.local/share/xksid
 UNIT_DIR  ?= $(HOME)/.config/systemd/user
 VECTORS_URL ?= https://huggingface.co/Lasimeri/xks-id-vectors/resolve/main
 
-XKSID_SRC = src/xksid/xksid.c src/xksid/rules.c src/xksid/sha256.c src/xksid/tok.c src/xksid/vec.c
-XKSID_HDR = src/xksid/rules.h src/xksid/sha256.h src/xksid/tok.h src/xksid/vec.h
+XKSID_SRC = src/xksid/xksid.c src/xksid/cal.c src/xksid/rules.c src/xksid/sha256.c src/xksid/tok.c src/xksid/vec.c
+XKSID_HDR = src/xksid/cal.h src/xksid/rules.h src/xksid/sha256.h src/xksid/tok.h src/xksid/vec.h
 TUI       = tui/target/release/xksid-tui
 
 LLAMA_INC = -isystem $(LLAMA_DIR)/src -isystem $(LLAMA_DIR)/include -isystem $(LLAMA_DIR)/ggml/include \
@@ -47,8 +47,14 @@ out/vec_test: tests/vec_test.c src/xksid/vec.c src/xksid/vec.h
 	@mkdir -p out
 	$(CC) $(CFLAGS) tests/vec_test.c src/xksid/vec.c -lm -o $@
 
-check: out/xksid out/vec_test
+# The window is made small so that it wraps several times within the test.
+out/cal_test: tests/cal_test.c src/xksid/cal.c src/xksid/cal.h
+	@mkdir -p out
+	$(CC) $(CFLAGS) -DXC_WINDOW=2500 tests/cal_test.c src/xksid/cal.c -lm -o $@
+
+check: out/xksid out/vec_test out/cal_test
 	out/vec_test
+	out/cal_test out/cal_test.f32
 	sh tests/run.sh
 
 install: all

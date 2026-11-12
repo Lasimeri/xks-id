@@ -6,7 +6,11 @@
 //   alerts.tsv    one line per alert, appended: detected, harness, session,
 //                 file, role, score, severity, rules, byte offset of the hit,
 //                 highest decision-vector logit ("-" without the table)
-//   l6.cut        alert and evidence logits from "xksid calibrate"
+//   cal.f32       highest decision-vector logit of every scored turn of tool
+//                 output, in the order of the turns, appended: the calibration
+//   cal.raised    sessions in which a turn above the cut has moved it once
+//   l6.cut        alert and evidence logits taken from cal.f32, kept current
+//   cut.tsv       one line each time those two moved, appended
 //   benign.f32    directions of windows marked as false positives
 //   suppressed.tsv  turns kept under the alert cut only by that feedback
 //   delivered.txt alerts the observed model has been told about ("xksid hook")
@@ -18,6 +22,7 @@
 
 #define _GNU_SOURCE
 
+#include "cal.h"
 #include "rules.h"
 #include "sha256.h"
 #include "tok.h"
@@ -25,6 +30,7 @@
 
 #include <dirent.h>
 #include <errno.h>
+#include <math.h>
 #include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -56,6 +62,18 @@ static int          g_l6;
 static double       g_cut, g_lean; // logits: an alert by itself at or above cut, evidence at or above lean
 static int32_t     *g_ids;
 static size_t       g_ids_cap;
+
+// The calibration of L6: the window the two levels are taken from, and what is known of the
+// files behind it and behind the feedback, so that a change made by another process is seen.
+static xc_cal g_cal;
+static int    g_cal_file;      // cal.f32 exists
+static ino_t  g_cal_ino;
+static off_t  g_cal_size;
+static FILE  *g_cal_out;       // open for appending while a scan adds turns
+static double g_pub_cut = NAN, g_pub_lean = NAN; // the levels last written to l6.cut
+static ino_t  g_benign_ino;
+static off_t  g_benign_size;
+static int    g_min_score = DEFAULT_MIN_SCORE; // a turn at or above this score is an alert
 
 static _Noreturn void die(const char *what) {
     fprintf(stderr, "xksid: %s: %s\n", what, strerror(errno));
@@ -101,31 +119,147 @@ static void set_paths(void) {
     g_model = model && *model ? sfmt("%s", model) : data && *data ? sfmt("%s/xksid", data) : sfmt("%s/.local/share/xksid", home);
 }
 
-// Without a calibration of its own the cut is the one stored with the head, and evidence
-// starts 1.5 below it. "xksid calibrate" replaces both with values from the operator's turns.
-static void load_l6(void) {
-    char *tok = sfmt("%s/dvec.tok", g_model), *vec = sfmt("%s/dvec.vec.f32", g_model), *head = sfmt("%s/dvec.head", g_model);
-    char *cut = sfmt("%s/l6.cut", g_state), *benign = sfmt("%s/benign.f32", g_state);
-    if (xv_head_load(&g_head, head) == 0 && xv_open(&g_table, vec, g_head.dim) == 0 && (g_tok = xt_load(tok)) != NULL &&
-        xt_n_vocab(g_tok) == g_table.n) {
-        g_l6   = 1;
+// The two levels come from the calibration window. While it holds too few turns they are the
+// cut stored with the head, with evidence starting 1.5 below it.
+static void set_levels(void) {
+    if (!xc_levels(&g_cal, &g_cut, &g_lean)) {
         g_cut  = (double) g_head.cut;
         g_lean = g_cut - 1.5;
-        FILE *f = fopen(cut, "r");
-        if (f != NULL) {
-            double c, l;
-            if (fscanf(f, "%lf %lf", &c, &l) == 2) {
-                g_cut  = c;
-                g_lean = l;
-            }
-            fclose(f);
-        }
-        xv_exemplars_load(&g_benign, benign, g_table.dim);
-        xv_exemplars_bind(&g_benign, &g_head);
-        g_benign.cos   = 0.85f;
-        g_benign.floor = (float) g_lean;
     }
-    free(tok); free(vec); free(head); free(cut); free(benign);
+    g_benign.floor = (float) g_lean;
+}
+
+// ---- one raise per session
+//
+// A plain moving quantile would let flagged text teach the cut: a few similar turns that the
+// rules miss, and the vector layer stops alerting on them. So a turn at or above the cut
+// enters the window as it is only once per session; every further one of that session
+// enters at the cut and cannot move it up. The sessions that used their raise are kept in
+// cal.raised. Below CAL_WARM values the quantile is not defined yet and values enter as
+// they are.
+
+enum { CAL_WARM = 1000 };
+
+static char **g_raised;
+static size_t g_raised_n, g_raised_cap;
+
+static int raised_has(const char *key) {
+    for (size_t i = 0; i < g_raised_n; i++) {
+        if (strcmp(g_raised[i], key) == 0) {
+            return 1;
+        }
+    }
+    return 0;
+}
+
+static void raised_put(char *key) { // takes the string
+    if (g_raised_n == g_raised_cap) {
+        g_raised_cap = g_raised_cap ? g_raised_cap * 2 : 64;
+        g_raised     = realloc(g_raised, g_raised_cap * sizeof *g_raised);
+        if (g_raised == NULL) {
+            die("out of memory");
+        }
+    }
+    g_raised[g_raised_n++] = key;
+}
+
+static void raised_clear(void) {
+    for (size_t i = 0; i < g_raised_n; i++) {
+        free(g_raised[i]);
+    }
+    g_raised_n = 0;
+}
+
+static void load_raised(void) {
+    char *path = sfmt("%s/cal.raised", g_state), line[256];
+    FILE *f    = fopen(path, "r");
+    raised_clear();
+    while (f != NULL && fgets(line, sizeof line, f) != NULL) {
+        line[strcspn(line, "\n")] = 0;
+        if (line[0] && !raised_has(line)) {
+            raised_put(sfmt("%s", line));
+        }
+    }
+    if (f != NULL) {
+        fclose(f);
+    }
+    free(path);
+}
+
+// The value a judged turn brings into the window. *raise is set when the turn used the one
+// raise of its session; the caller records that.
+static float cal_value(float logit, const char *harness, const char *sess, int *raise) {
+    double cut, lean;
+    *raise = 0;
+    if (g_cal.n < CAL_WARM || !xc_levels(&g_cal, &cut, &lean) || (double) logit < cut) {
+        return logit;
+    }
+    char *key = sfmt("%s/%s", harness, sess);
+    if (!raised_has(key)) {
+        raised_put(key);
+        *raise = 1;
+        return logit;
+    }
+    free(key);
+    return (float) (cut - 1e-6); // the value the cut rests on: the cut stays where it is
+}
+
+// the directions the operator marked as false positives
+static void load_benign(void) {
+    char       *path = sfmt("%s/benign.f32", g_state);
+    struct stat st;
+    const int   have = stat(path, &st) == 0;
+    xv_exemplars_free(&g_benign);
+    xv_exemplars_load(&g_benign, path, g_table.dim);
+    xv_exemplars_bind(&g_benign, &g_head);
+    g_benign.cos   = 0.85f;
+    g_benign.floor = (float) g_lean;
+    g_benign_ino   = have ? st.st_ino : 0;
+    g_benign_size  = have ? st.st_size : 0;
+    free(path);
+}
+
+// The calibration window from cal.f32. A state written before the engine calibrated itself
+// has no such file yet: its l6.cut is honoured until the first scan builds one.
+static void load_cal(void) {
+    char       *path = sfmt("%s/cal.f32", g_state);
+    struct stat st;
+    g_cal_file = stat(path, &st) == 0;
+    g_cal_ino  = g_cal_file ? st.st_ino : 0;
+    g_cal_size = g_cal_file ? st.st_size : 0;
+    if (xc_load(&g_cal, path) != 0) {
+        die(path);
+    }
+    free(path);
+    load_raised();
+    set_levels();
+    path    = sfmt("%s/l6.cut", g_state);
+    FILE *f = fopen(path, "r");
+    double c, l;
+    if (f != NULL && fscanf(f, "%lf %lf", &c, &l) == 2) {
+        g_pub_cut  = c;
+        g_pub_lean = l;
+        if (!g_cal_file) {
+            g_cut          = c;
+            g_lean         = l;
+            g_benign.floor = (float) g_lean;
+        }
+    }
+    if (f != NULL) {
+        fclose(f);
+    }
+    free(path);
+}
+
+static void load_l6(void) {
+    char *tok = sfmt("%s/dvec.tok", g_model), *vec = sfmt("%s/dvec.vec.f32", g_model), *head = sfmt("%s/dvec.head", g_model);
+    if (xv_head_load(&g_head, head) == 0 && xv_open(&g_table, vec, g_head.dim) == 0 && (g_tok = xt_load(tok)) != NULL &&
+        xt_n_vocab(g_tok) == g_table.n) {
+        g_l6 = 1;
+        load_cal();
+        load_benign();
+    }
+    free(tok); free(vec); free(head);
 }
 
 // highest window logit of a text; count receives its number of tokens
@@ -397,14 +531,87 @@ static void safe_copy(char *dst, size_t cap, const char *src) {
     dst[i] = 0;
 }
 
-static void scan_turn(const char *harness, const char *sess_name, const char *file, int min_score, FILE *alerts, scan_out *o) {
-    // YYYY-MM-DD_HH-MM-SS.mmm_ROLE_SHA8.md
+// The role of a turn from its file name, YYYY-MM-DD_HH-MM-SS.mmm_ROLE_SHA8.md. Returns 0 for
+// a name of another shape.
+static int turn_role(const char *file, char role[32]) {
     const size_t n = strlen(file);
     if (n < 24 + 1 + 1 + 8 + 3 || file[10] != '_' || file[23] != '_' || file[n - 12] != '_') {
+        return 0;
+    }
+    snprintf(role, 32, "%.*s", (int) (n - 12 - 24 < 31 ? n - 12 - 24 : 31), file + 24);
+    return 1;
+}
+
+static int is_untrusted(const char *role) {
+    return strcmp(role, "tool_result") == 0 || strcmp(role, "note") == 0;
+}
+
+// ---- calibration: the alert cut follows the operator's own recorded tool output.
+//
+// The engine keeps the highest window logit of each scored turn in cal.f32 and takes the two
+// levels from the most recent XC_WINDOW of them: the cut where 1 turn in 1,000 lies above
+// it, evidence where 1 in 50 does. No model, no GPU, no command.
+
+// Writes the levels where the interface and the other commands read them, and logs the move.
+static void publish_levels(void) {
+    if (!g_l6 || (fabs(g_cut - g_pub_cut) < 5e-7 && fabs(g_lean - g_pub_lean) < 5e-7)) {
         return;
     }
+    char *tmp, *final, when[40];
+    FILE *f = open_new("l6.cut", &tmp, &final);
+    fprintf(f, "%.6f %.6f\n", g_cut, g_lean);
+    close_new(f, tmp, final);
+
+    char *path = sfmt("%s/cut.tsv", g_state);
+    f          = fopen(path, "a");
+    now_iso(when);
+    if (f != NULL) {
+        fprintf(f, "%s\t%.6f\t%.6f\t%zu\n", when, g_cut, g_lean, g_cal.n);
+        fclose(f);
+    }
+    free(path);
+    if (!isnan(g_pub_cut)) {
+        printf("alert cut %.3f -> %.3f, evidence from %.3f -> %.3f (%zu turns in the window)\n", g_pub_cut, g_cut, g_pub_lean, g_lean, g_cal.n);
+    }
+    g_pub_cut  = g_cut;
+    g_pub_lean = g_lean;
+}
+
+// A scored turn joins the calibration after it has been judged. A turn that the wording and
+// structure rules alone already call an injection stays out: it must not teach the cut what
+// plain tool output looks like.
+static void cal_take(float logit, int flagged, const char *harness, const char *sess) {
+    if (flagged) {
+        bump(1, "cal.excluded");
+        return;
+    }
+    int         raise;
+    const float v = cal_value(logit, harness, sess, &raise);
+    if (raise) {
+        char *path = sfmt("%s/cal.raised", g_state);
+        FILE *f    = fopen(path, "a");
+        if (f == NULL || fprintf(f, "%s/%s\n", harness, sess) < 0 || fclose(f) != 0) {
+            die(path);
+        }
+        free(path);
+        bump(1, "cal.raises");
+    } else if (v != logit) {
+        bump(1, "cal.held");
+    }
+    if (fwrite(&v, sizeof v, 1, g_cal_out) != 1) {
+        die("cal.f32");
+    }
+    xc_add(&g_cal, v);
+    set_levels();
+    bump(1, "cal.turns");
+}
+
+static void scan_turn(const char *harness, const char *sess_name, const char *file, int min_score, FILE *alerts, scan_out *o) {
     char role[32];
-    snprintf(role, sizeof role, "%.*s", (int) (n - 12 - 24 < 31 ? n - 12 - 24 : 31), file + 24);
+    if (!turn_role(file, role)) {
+        return;
+    }
+    const size_t n = strlen(file);
 
     char  *path = sfmt("%s/%s/%s/%s", g_root, harness, sess_name, file);
     size_t len  = 0;
@@ -420,13 +627,14 @@ static void scan_turn(const char *harness, const char *sess_name, const char *fi
         head++;
     }
     head = head < len ? head + 1 : len;
-    const int kind = strcmp(role, "tool_result") == 0 || strcmp(role, "note") == 0 ? XR_UNTRUSTED : strcmp(role, "user") == 0 ? XR_OPERATOR : 0;
+    const int kind = is_untrusted(role) ? XR_UNTRUSTED : strcmp(role, "user") == 0 ? XR_OPERATOR : 0;
     if (kind != 0) {
         xr_scan(buf + head, len - head, kind, &res);
     }
     double logit = XV_NO_SCORE;
     if (kind == XR_UNTRUSTED && g_l6) {
-        size_t at, vetoed, count;
+        const int by_rules = res.score; // what the wording and the structure alone say
+        size_t    at, vetoed, count;
         logit = l6_score(buf + head, len - head, 1, &at, &vetoed, &count);
         if (logit >= g_cut) {
             xr_fire(&res, XR_V602, -1);
@@ -451,6 +659,9 @@ static void scan_turn(const char *harness, const char *sess_name, const char *fi
                 free(spath);
                 bump(1, "l6.suppressed");
             }
+        }
+        if (logit > XV_NO_SCORE && g_cal_out != NULL) {
+            cal_take((float) logit, by_rules >= min_score, harness, sess_name);
         }
     }
 
@@ -548,28 +759,191 @@ static void walk_turns(turn_fn fn, void *ctx) {
     closedir(root);
 }
 
-typedef struct {
-    int       min_score;
-    FILE     *alerts, *seen;
-    scan_out *o;
-} scan_ctx;
-
-static void scan_new(const char *harness, const char *sess, const char *file, void *p) {
-    scan_ctx      *c   = p;
-    char          *key = sfmt("%s/%s/%s", harness, sess, file);
-    const uint64_t id  = fnv1a(key);
-    size_t         slot;
-    if (g_seen_cap == 0 || !seen_find(id, &slot)) {
-        scan_turn(harness, sess, file, c->min_score, c->alerts, c->o);
-        fprintf(c->seen, "%s\n", key);
-        seen_add(id);
+static size_t header_len(const unsigned char *buf, size_t len) {
+    size_t head = 0;
+    while (head < len && buf[head] != '\n') {
+        head++;
     }
+    return head < len ? head + 1 : len;
+}
+
+// A list of turn files. Turns are handled in the order of their times, which the file names
+// carry, whatever order the directories give them in.
+typedef struct {
+    char *harness, *sess, *file;
+    float logit;   // calibration only
+    int   flagged; // calibration only: the rules alone call it an injection
+} turn_ref;
+
+typedef struct {
+    turn_ref *t;
+    size_t    n, cap;
+    int       read_before; // 1: only the turns the engine has read; 0: only those it has not
+    int       only_untrusted;
+} turn_list;
+
+static void list_turn(const char *harness, const char *sess, const char *file, void *p) {
+    turn_list *l = p;
+    char       role[32];
+    if (l->only_untrusted && !(turn_role(file, role) && is_untrusted(role))) {
+        return;
+    }
+    char     *key  = sfmt("%s/%s/%s", harness, sess, file);
+    size_t    slot;
+    const int seen = g_seen_cap != 0 && seen_find(fnv1a(key), &slot);
     free(key);
+    if (seen != l->read_before) {
+        return;
+    }
+    if (l->n == l->cap) {
+        l->cap = l->cap ? l->cap * 2 : 1024;
+        l->t   = realloc(l->t, l->cap * sizeof *l->t);
+        if (l->t == NULL) {
+            die("out of memory");
+        }
+    }
+    l->t[l->n++] = (turn_ref) {sfmt("%s", harness), sfmt("%s", sess), sfmt("%s", file), (float) XV_NO_SCORE, 0};
+}
+
+static int by_time(const void *a, const void *b) {
+    const turn_ref *x = a, *y = b;
+    int             c = strcmp(x->file, y->file);
+    c = c ? c : strcmp(x->sess, y->sess);
+    return c ? c : strcmp(x->harness, y->harness);
+}
+
+static void free_list(turn_list *l) {
+    for (size_t i = 0; i < l->n; i++) {
+        free(l->t[i].harness);
+        free(l->t[i].sess);
+        free(l->t[i].file);
+    }
+    free(l->t);
+    memset(l, 0, sizeof *l);
+}
+
+typedef struct {
+    size_t scored, flagged, kept, above, raises;
+    double seconds;
+} cal_report;
+
+// Builds the calibration again from the turns the engine has already read: the most recent
+// XC_WINDOW turns of tool output that the rules alone do not flag, scored as the engine
+// scores them, in the order of their times. A turn it has not read yet is left to the scan
+// that reads it, so every turn enters the calibration exactly once. The cost is bounded by
+// the window, not by the size of the history. The list, in the order of the turns with the
+// scored ones marked, is left to the caller.
+static void cal_rebuild(turn_list *l, cal_report *rep) {
+    const double t0 = monotonic();
+    memset(rep, 0, sizeof *rep);
+    memset(l, 0, sizeof *l);
+    l->only_untrusted = 1;
+    l->read_before    = 1;
+    walk_turns(list_turn, l);
+    qsort(l->t, l->n, sizeof *l->t, by_time);
+
+    // newest first, until the window is full
+    size_t first = l->n;
+    while (first > 0 && rep->kept < XC_WINDOW) {
+        turn_ref      *t    = &l->t[--first];
+        char          *path = sfmt("%s/%s/%s/%s", g_root, t->harness, t->sess, t->file);
+        size_t         len  = 0, at, vetoed, count;
+        unsigned char *buf  = read_turn(path, &len);
+        free(path);
+        t->logit = (float) XV_NO_SCORE;
+        if (buf == NULL) {
+            continue;
+        }
+        const size_t head = header_len(buf, len);
+        xr_result    res  = {0, 0, -1};
+        xr_scan(buf + head, len - head, XR_UNTRUSTED, &res);
+        const double logit = l6_score(buf + head, len - head, 1, &at, &vetoed, &count);
+        free(buf);
+        if (logit <= XV_NO_SCORE) {
+            continue;
+        }
+        t->logit   = (float) logit;
+        t->flagged = res.score >= g_min_score;
+        rep->scored++;
+        rep->flagged += (size_t) t->flagged;
+        rep->kept += (size_t) !t->flagged;
+    }
+
+    // oldest first into the window and the file, as the engine would have met them
+    char *tmp, *final;
+    FILE *f = open_new("cal.f32", &tmp, &final);
+    xc_reset(&g_cal);
+    raised_clear();
+    set_levels();
+    for (size_t i = first; i < l->n; i++) {
+        const turn_ref *t = &l->t[i];
+        if (t->logit <= (float) XV_NO_SCORE || t->flagged) {
+            continue;
+        }
+        int         raise;
+        const float v = cal_value(t->logit, t->harness, t->sess, &raise);
+        rep->above += (size_t) ((double) t->logit >= g_cut);
+        rep->raises += (size_t) raise;
+        if (fwrite(&v, sizeof v, 1, f) != 1) {
+            die("cal.f32");
+        }
+        xc_add(&g_cal, v);
+        set_levels();
+    }
+    close_new(f, tmp, final);
+    f = open_new("cal.raised", &tmp, &final);
+    for (size_t i = 0; i < g_raised_n; i++) {
+        fprintf(f, "%s\n", g_raised[i]);
+    }
+    close_new(f, tmp, final);
+
+    char       *path = sfmt("%s/cal.f32", g_state);
+    struct stat st;
+    g_cal_file = stat(path, &st) == 0;
+    g_cal_ino  = g_cal_file ? st.st_ino : 0;
+    g_cal_size = g_cal_file ? st.st_size : 0;
+    free(path);
+    set_levels();
+    publish_levels();
+    rep->seconds = monotonic() - t0;
+}
+
+// Before a scan: has the operator given feedback, or has the calibration been built again by
+// another process, since this one last looked?
+static void refresh_l6(void) {
+    struct stat st;
+    char       *path   = sfmt("%s/benign.f32", g_state);
+    int         have   = stat(path, &st) == 0;
+    const int   marked = (have ? st.st_ino : 0) != g_benign_ino || (have ? st.st_size : 0) != g_benign_size;
+    free(path);
+    if (marked) {
+        load_benign();
+    }
+    path = sfmt("%s/cal.f32", g_state);
+    have = stat(path, &st) == 0;
+    free(path);
+    if (!have || marked) {
+        // No calibration yet, or the feedback changed what turns score: build it.
+        turn_list  l;
+        cal_report rep;
+        cal_rebuild(&l, &rep);
+        free_list(&l);
+        bump(1, "cal.rebuilds");
+        printf("calibration built from %zu turns of tool output read before, in %.3f s: alert cut %.3f, evidence from %.3f\n", rep.kept,
+               rep.seconds, g_cut, g_lean);
+        return;
+    }
+    if (st.st_ino != g_cal_ino || st.st_size != g_cal_size) {
+        load_cal();
+    }
 }
 
 static void scan_once(int min_score, scan_out *o) {
     memset(o, 0, sizeof *o);
     const double t0 = monotonic();
+    if (g_l6) {
+        refresh_l6();
+    }
 
     char *path  = sfmt("%s/alerts.tsv", g_state);
     FILE *alerts = fopen(path, "a");
@@ -580,11 +954,39 @@ static void scan_once(int min_score, scan_out *o) {
     if (alerts == NULL || seen == NULL) {
         die(g_state);
     }
+    if (g_l6) {
+        path      = sfmt("%s/cal.f32", g_state);
+        g_cal_out = fopen(path, "ab");
+        if (g_cal_out == NULL) {
+            die(path);
+        }
+        free(path);
+    }
 
-    scan_ctx ctx = {min_score, alerts, seen, o};
-    walk_turns(scan_new, &ctx);
+    turn_list l = {0};
+    walk_turns(list_turn, &l); // the turns not read before
+    qsort(l.t, l.n, sizeof *l.t, by_time);
+    for (size_t i = 0; i < l.n; i++) {
+        const turn_ref *t   = &l.t[i];
+        char           *key = sfmt("%s/%s/%s", t->harness, t->sess, t->file);
+        scan_turn(t->harness, t->sess, t->file, min_score, alerts, o);
+        fprintf(seen, "%s\n", key);
+        seen_add(fnv1a(key));
+        free(key);
+    }
+    free_list(&l);
     fclose(alerts);
     fclose(seen);
+    if (g_cal_out != NULL) {
+        struct stat st;
+        if (fflush(g_cal_out) != 0 || fstat(fileno(g_cal_out), &st) != 0) {
+            die("cal.f32");
+        }
+        g_cal_size = st.st_size;
+        fclose(g_cal_out);
+        g_cal_out = NULL;
+    }
+    publish_levels();
 
     o->seconds = monotonic() - t0;
     char when[40];
@@ -630,58 +1032,11 @@ static void print_scan(const scan_out *o) {
            o->seconds > 0 ? (double) o->files / o->seconds : 0.0, o->alerts);
 }
 
-static size_t header_len(const unsigned char *buf, size_t len) {
-    size_t head = 0;
-    while (head < len && buf[head] != '\n') {
-        head++;
-    }
-    return head < len ? head + 1 : len;
-}
-
-// ---- calibrate: the alert cut from the operator's own recorded turns. No model, no GPU:
-// every recorded turn of tool output is scored with the table, and the cut is set where
-// 1 turn in 1,000 of that history lies above it; evidence starts where 1 in 50 does.
-
-typedef struct {
-    double *logit;
-    char  **name;
-    size_t  n, cap;
-} cal_ctx;
-
-static void cal_turn(const char *harness, const char *sess, const char *file, void *p) {
-    cal_ctx *c = p;
-    if (strstr(file, "_tool_result_") == NULL && strstr(file, "_note_") == NULL) {
-        return;
-    }
-    char          *path = sfmt("%s/%s/%s/%s", g_root, harness, sess, file);
-    size_t         len  = 0, at, vetoed, count;
-    unsigned char *buf  = read_turn(path, &len);
-    free(path);
-    if (buf == NULL) {
-        return;
-    }
-    const size_t head  = header_len(buf, len);
-    const double logit = l6_score(buf + head, len - head, 0, &at, &vetoed, &count);
-    free(buf);
-    if (logit <= XV_NO_SCORE) {
-        return;
-    }
-    if (c->n == c->cap) {
-        c->cap   = c->cap ? c->cap * 2 : 4096;
-        c->logit = realloc(c->logit, c->cap * sizeof *c->logit);
-        c->name  = realloc(c->name, c->cap * sizeof *c->name);
-        if (c->logit == NULL || c->name == NULL) {
-            die("out of memory");
-        }
-    }
-    c->logit[c->n]  = logit;
-    c->name[c->n++] = sfmt("%s/%s/%s", harness, sess, file);
-}
-
-static const double *g_sort_key;
+// ---- calibrate: builds the calibration again from the recorded turns and says what it holds.
+// The engine does the same by itself when there is none, and keeps it current afterwards.
 
 static int by_logit_desc(const void *a, const void *b) {
-    const double x = g_sort_key[*(const size_t *) a], y = g_sort_key[*(const size_t *) b];
+    const float x = ((const turn_ref *) a)->logit, y = ((const turn_ref *) b)->logit;
     return (x < y) - (x > y);
 }
 
@@ -690,38 +1045,36 @@ static int cmd_calibrate(void) {
         fprintf(stderr, "xksid: no decision vectors under %s (dvec.tok, dvec.vec.f32, dvec.head)\n", g_model);
         return 1;
     }
-    cal_ctx      c  = {0};
-    const double t0 = monotonic();
-    walk_turns(cal_turn, &c);
-    const double seconds = monotonic() - t0;
-    if (c.n < 100) {
-        fprintf(stderr, "xksid: %zu recorded turns of tool output; 100 are needed to calibrate\n", c.n);
-        return 1;
+    turn_list  l;
+    cal_report rep;
+    cal_rebuild(&l, &rep);
+    if (g_seen_n == 0) {
+        printf("the engine has read no turn yet: run \"xksid scan\" or start the service, and it calibrates as it reads\n");
+        free_list(&l);
+        return 0;
     }
-    size_t *idx = malloc(c.n * sizeof *idx);
-    if (idx == NULL) {
-        die("out of memory");
+    printf("%zu turns of tool output the engine has read, scored in %.3f s (%.0f turns/s, kernel %s)\n", rep.scored, rep.seconds,
+           rep.seconds > 0 ? (double) rep.scored / rep.seconds : 0.0, xv_kernel());
+    printf("%zu of them are left out: the wording and structure rules alone flag them\n", rep.flagged);
+    const size_t n = g_cal.n;
+    if (n < XC_MIN) {
+        printf("the window holds %zu turns and needs %d: until then the alert cut is the one stored with the head, %.3f\n", n, XC_MIN, g_cut);
+    } else {
+        const float *s = g_cal.sorted;
+        printf("window: the %zu most recent of the rest (it holds %d at most)\n", n, XC_WINDOW);
+        printf("highest logit %.3f, 1 in 1000 above %.3f, 1 in 100 above %.3f, 1 in 50 above %.3f, median %.3f\n", (double) s[n - 1],
+               (double) s[n - 1 - n / 1000], (double) s[n - 1 - n / 100], (double) s[n - 1 - n / 50], (double) s[n - 1 - n / 2]);
+        printf("alert cut %.3f, evidence from %.3f\n", g_cut, g_lean);
+        printf("replayed in the order of the turns, %zu of them lay at or above the cut in force when they arrived;\n", rep.above);
+        printf("%zu of those moved the cut (one per session at most), the others entered at the cut\n", rep.raises);
     }
-    for (size_t i = 0; i < c.n; i++) {
-        idx[i] = i;
+    printf("the engine keeps both levels current by itself: every turn it scores moves the window\n");
+    printf("the highest turns of the window, worth a look:\n");
+    qsort(l.t, l.n, sizeof *l.t, by_logit_desc);
+    for (size_t i = 0; i < 5 && i < l.n && l.t[i].logit > (float) XV_NO_SCORE; i++) {
+        printf("  %8.3f  %s/%s/%s%s\n", (double) l.t[i].logit, l.t[i].harness, l.t[i].sess, l.t[i].file, l.t[i].flagged ? "  (left out)" : "");
     }
-    g_sort_key = c.logit;
-    qsort(idx, c.n, sizeof *idx, by_logit_desc);
-    const double cut = c.logit[idx[c.n / 1000]] + 1e-6, lean = c.logit[idx[c.n / 50]] + 1e-6;
-
-    char *tmp, *final;
-    FILE *f = open_new("l6.cut", &tmp, &final);
-    fprintf(f, "%.6f %.6f\n", cut, lean);
-    close_new(f, tmp, final);
-
-    printf("%zu recorded turns of tool output scored in %.3f s (%.0f turns/s, kernel %s)\n", c.n, seconds, (double) c.n / seconds, xv_kernel());
-    printf("highest logit %.3f, 1 in 1000 above %.3f, 1 in 100 above %.3f, 1 in 50 above %.3f, median %.3f\n", c.logit[idx[0]],
-           c.logit[idx[c.n / 1000]], c.logit[idx[c.n / 100]], c.logit[idx[c.n / 50]], c.logit[idx[c.n / 2]]);
-    printf("alert cut %.3f (%zu turns of this history lie above it), evidence from %.3f\n", cut, c.n / 1000, lean);
-    printf("the highest turns of this history, worth a look:\n");
-    for (size_t i = 0; i < 5; i++) {
-        printf("  %8.3f  %s\n", c.logit[idx[i]], c.name[idx[i]]);
-    }
+    free_list(&l);
     return 0;
 }
 
@@ -954,8 +1307,9 @@ static int usage(void) {
             "                                                keep reading, all day; report new alerts\n"
             "       xksid status                             paths, decision vectors, counters\n"
             "       xksid rules                              the rules and their weights\n"
-            "       xksid calibrate                          set the alert cut of the decision vectors\n"
-            "                                                from your own recorded turns\n"
+            "       xksid calibrate                          build the alert cut of the decision vectors again\n"
+            "                                                from your recorded turns and show it; the engine\n"
+            "                                                keeps it current by itself\n"
             "       xksid feedback HARNESS/SESSION/FILE      that turn was a false positive: turns like\n"
             "                                                it no longer alert by the decision vectors\n"
             "       xksid hook      [--session ID] [--event NAME]\n"
@@ -998,6 +1352,7 @@ int main(int argc, char **argv) {
     if (min_score < 1 || interval < 1) {
         return usage();
     }
+    g_min_score = min_score;
 
     if (strcmp(cmd, "version") == 0) {
         printf("xksid %s\n", XKSID_VERSION);
@@ -1016,6 +1371,7 @@ int main(int argc, char **argv) {
     }
     load_l6();
     if (strcmp(cmd, "calibrate") == 0) {
+        load_state(); // which turns the engine has read
         return cmd_calibrate();
     }
     if (strcmp(cmd, "feedback") == 0) {
@@ -1027,6 +1383,21 @@ int main(int argc, char **argv) {
         if (g_l6) {
             printf("decision vectors\ton, %d tokens x %d, kernel %s\nalert cut\t%.3f\nevidence from\t%.3f\nbenign exemplars\t%zu\n", g_table.n,
                    g_table.dim, xv_kernel(), g_cut, g_lean, g_benign.n);
+            if (g_cal.n >= XC_MIN) {
+                printf("calibration\tautomatic, from the %zu most recent scored turns (window of %d)\n", g_cal.n, XC_WINDOW);
+            } else {
+                printf("calibration\tautomatic, waiting: %zu scored turns of the %d it needs\n", g_cal.n, XC_MIN);
+            }
+            char  when[40] = "-", line[160], *path = sfmt("%s/cut.tsv", g_state);
+            FILE *f = fopen(path, "r");
+            while (f != NULL && fgets(line, sizeof line, f) != NULL) {
+                sscanf(line, "%39[^\t]", when);
+            }
+            if (f != NULL) {
+                fclose(f);
+            }
+            free(path);
+            printf("cut last moved\t%s\n", when);
         } else {
             printf("decision vectors\toff (no dvec.tok, dvec.vec.f32, dvec.head under the model directory)\n");
         }
@@ -1047,8 +1418,8 @@ int main(int argc, char **argv) {
         scan_once(min_score, &o);
         if (!watch || o.files > 0) {
             print_scan(&o);
-            fflush(stdout);
         }
+        fflush(stdout);
         if (watch && o.alerts > 0 && do_notify) {
             notify(&o);
         }
