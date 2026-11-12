@@ -4,7 +4,8 @@
  * does that from the turn files XKS-Memory records. This extension only asks xksid for the
  * alerts of the session that the model has not been told about yet.
  *
- * Install: copy (or link) this file to ~/.omp/agent/hooks/pre/xks-id.ts (default profile) or
+ * Install: "make hook-omp" (default profile) or "make hook-omp OMP_PROFILE=NAME". By hand: copy
+ * (or link) this file to ~/.omp/agent/hooks/pre/xks-id.ts (default profile) or
  * ~/.omp/profiles/<name>/agent/hooks/pre/ (named profile). Needs the xksid binary: $XKSID_BIN,
  * ~/.local/bin/xksid, or xksid on PATH.
  *

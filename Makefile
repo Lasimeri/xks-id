@@ -4,6 +4,9 @@
 #   make out/xksid        the engine alone: needs a C compiler and nothing else
 #   make check            the tests
 #   make install          binaries to $(PREFIX)/bin, the service file to ~/.config/systemd/user
+#   make hook-claude-code the model notice hook into ~/.claude/settings.json (needs jq)
+#   make hook-omp [OMP_PROFILE=NAME]
+#                         the model notice hook into an omp profile (the default one without a name)
 #   make fetch-vectors    download the decision vectors (about 1 GB) to $(MODEL_DIR) and check them
 #   make install-vectors VECTORS=DIR
 #                         dvec.tok, dvec.vec.f32 and dvec.head from DIR to $(MODEL_DIR)
@@ -29,7 +32,7 @@ LLAMA_INC = -isystem $(LLAMA_DIR)/src -isystem $(LLAMA_DIR)/include -isystem $(L
             -isystem $(LLAMA_DIR)/common -isystem $(LLAMA_DIR)/vendor
 LLAMA_LIB = -L$(LLAMA_BUILD)/bin -lllama-common -lllama -lggml-base -Wl,-rpath,$(LLAMA_BUILD)/bin
 
-.PHONY: all tui check install fetch-vectors install-vectors distil
+.PHONY: all tui check install hook-claude-code hook-omp fetch-vectors install-vectors distil
 all: out/xksid tui
 
 out/xksid: $(XKSID_SRC) $(XKSID_HDR)
@@ -56,6 +59,8 @@ check: out/xksid out/vec_test out/cal_test
 	out/vec_test
 	out/cal_test out/cal_test.f32
 	sh tests/run.sh
+	sh tests/notify.sh
+	sh tests/stop.sh
 
 install: all
 	install -d $(PREFIX)/bin $(UNIT_DIR)
@@ -63,6 +68,14 @@ install: all
 	install -m 755 $(TUI) $(PREFIX)/bin/xksid-tui
 	install -m 644 integrations/systemd/xksid.service $(UNIT_DIR)/xksid.service
 	@echo "installed. Nothing was started or enabled: docs/SETUP.md has the next steps."
+
+# The harness hooks: each target changes one file of that harness and says which
+# (integrations/wire.sh). Neither is part of install.
+hook-claude-code:
+	sh integrations/wire.sh claude-code
+
+hook-omp:
+	sh integrations/wire.sh omp $(OMP_PROFILE)
 
 # An interrupted download continues where it stopped. The files are used only if all three
 # match docs/vectors.sha256.

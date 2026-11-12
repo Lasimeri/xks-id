@@ -33,7 +33,9 @@ systemctl --user enable --now xksid
 systemctl --user status xksid
 ```
 
-The service runs `xksid watch --interval 2 --notify`: one cycle every 2 seconds over the new turn files, and a desktop notification (through `notify-send`, if present) per batch of alerts. The notification names the harness, the session and the rule ids, never the flagged text.
+The service runs `xksid watch --interval 2 --notify`: one cycle every 2 seconds over the new turn files, and a desktop notification (through `notify-send`, if present) per batch of alerts.
+
+The notification names the harness, the session, the score and the rule ids of the highest alert of the batch, and under them it shows what that turn says: up to 280 characters, starting at the line of the first hit (at the top of the turn for an alert raised by the vectors alone). The text is made harmless first: control and non-ASCII characters are dots, and `&`, `<`, `>` are escaped, so it cannot draw a link or load an image in the popup. To keep turn text out of the desktop's notification history, change `--notify` to `--notify-ids` in `~/.config/systemd/user/xksid.service`, then `systemctl --user daemon-reload` and `systemctl --user restart xksid`: the popup then carries the ids alone.
 
 While the service runs, `xksid scan` exits with code 3: the engine is already reading.
 
@@ -41,16 +43,36 @@ While the service runs, `xksid scan` exits with code 3: the engine is already re
 
 The engine writes alerts; a hook in the harness delivers them to the model. The hook detects nothing. It runs `xksid hook`, which prints a notice for the flagged turns of that session that the model has not been told about, once each.
 
-**Claude Code.** Merge the three entries of `integrations/claude-code/hooks.json` into the `hooks` object of `~/.claude/settings.json`, next to the hooks already there:
+```
+make hook-claude-code            # Claude Code
+make hook-omp                    # omp, default profile
+make hook-omp OMP_PROFILE=NAME   # omp, a named profile
+```
+
+Each target changes one file of that harness and prints which. Running it a second time changes nothing.
+
+**Claude Code.** The three entries of `integrations/claude-code/hooks.json` are added to the `hooks` object of `~/.claude/settings.json`, next to the hooks already there (this needs `jq`; without it, merge the entries by hand). The file as it was is kept beside it as `settings.json.before-xksid-DATE-TIME`.
 
 - `PostToolUse` and `UserPromptSubmit`: the notice is added to the model's context.
-- `Stop`: if an alert is still undelivered when the model wants to stop, the stop is refused once and the notice is the reason.
+- `Stop`: the hook first waits for the engine's verdict on the turns XKS-Memory writes during the stop (about 0.13 s when measured). If one of them is flagged, or an earlier alert is still undelivered, the stop is refused once and the notice is the reason.
 
-**omp.** Link `integrations/omp/xks-id.ts` into the hook directory of the profile, `~/.omp/agent/hooks/pre/` for the default profile. The notice arrives at the next prompt.
+A session that was already running picked the new hooks up without a restart when this was tested. If one does not, open `/hooks` in it once or restart it. One call of the hook with nothing to report takes about 1 ms.
+
+**omp.** `integrations/omp/xks-id.ts` is copied to `~/.local/share/xksid/omp/` and linked into the hook directory of the profile: `~/.omp/agent/hooks/pre/` for the default profile, `~/.omp/profiles/NAME/agent/hooks/pre/` for a named one. The notice arrives at the next prompt of a session started after that.
+
+Wire the profile XKS-Memory is attached to. A profile whose turns are not recorded has nothing the engine could flag, and the target says so.
 
 **Any other harness.** `xksid hook --session ID` prints the notice as plain text, or nothing.
 
-XKS-Memory stores a tool result a moment after the tool call. The notice for a tool result therefore reaches the model at its next hook event.
+**When the notice arrives.** In Claude Code, XKS-Memory writes a tool result to its turn file at the hook event after the one that produced it: at the next tool call, at the stop, or at the next prompt. The engine cannot see it sooner. So:
+
+- A flagged tool result in the middle of a turn: the notice arrives after the second tool call that follows it (19 s after the result in the test, with tool calls 6 to 13 s apart).
+- A flagged tool result at the end of a turn: the stop is refused (4.1 s after the result in the test; 0.13 s after the model's last word).
+- An alert raised while the model is idle: the notice arrives with the next prompt.
+
+In omp, XKS-Memory stores a tool result at once, the engine flags it within its 2 s cycle, and the notice arrives with the next prompt of the session.
+
+If the engine runs and XKS-Memory writes nothing during a stop (its logging is paused), the stop hook waits 1 s before it lets the stop through. With no engine running it does not wait.
 
 ## 5. The interface
 
@@ -107,4 +129,4 @@ A marked turn can still alert through the rules. Feedback takes effect at the en
 systemctl --user disable --now xksid
 ```
 
-Then remove the two binaries, the service file, the hook entries, and the state and vector directories named in step 2. XKS-Memory is untouched throughout.
+Then remove the two binaries, the service file, and the state and vector directories named in step 2. The hooks: take the three `xksid hook` entries out of `~/.claude/settings.json` (or put back the copy kept beside it, if nothing else changed since), and remove the link `xks-id.ts` from the omp hook directory. XKS-Memory is untouched throughout.

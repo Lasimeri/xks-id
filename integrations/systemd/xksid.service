@@ -3,7 +3,8 @@ Description=xks-id: reads the turns XKS-Memory records and reports prompt inject
 Documentation=https://github.com/Lasimeri/xks-id
 
 [Service]
-# One cycle every 2 seconds over the new turn files; a desktop notification per batch of alerts.
+# One cycle every 2 seconds over the new turn files; a desktop notification per batch of alerts
+# that shows what the highest one says (--notify-ids instead: the rule ids alone).
 ExecStart=%h/.local/bin/xksid watch --interval 2 --notify
 Restart=on-failure
 RestartSec=5

@@ -15,10 +15,13 @@
 //   suppressed.tsv  turns kept under the alert cut only by that feedback
 //   delivered.txt alerts the observed model has been told about ("xksid hook")
 //   seen.txt      the turn files already read, appended
+//   lock          held by the one scanner; holds the process id of a running "watch"
 //   stats.tsv     counters, rewritten after every scan
 //   sessions.tsv  per session: turns, alerts, highest score, last turn
 // No file of the state carries text from a turn: rule ids and offsets only.
-// The same holds for the notice the hook prints for the model.
+// The same holds for the notice the hook prints for the model. The desktop
+// notification of "watch --notify" is the one place where words of a turn are shown: to
+// the operator, never to the model, and made harmless first (excerpt()).
 
 #define _GNU_SOURCE
 
@@ -31,6 +34,7 @@
 #include <dirent.h>
 #include <errno.h>
 #include <math.h>
+#include <signal.h>
 #include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -486,7 +490,8 @@ typedef struct {
     long long files, bytes, alerts;
     double    seconds;
     int       top_score;
-    char      top[160]; // harness, session and rule ids of the highest alert, safe characters only
+    char      top[160];       // harness, session and rule ids of the highest alert, safe characters only
+    char      top_text[1500]; // what that turn says near its first hit, made harmless: see excerpt()
 } scan_out;
 
 static int is_dir(const char *path) {
@@ -606,6 +611,51 @@ static void cal_take(float logit, int flagged, const char *harness, const char *
     bump(1, "cal.turns");
 }
 
+// What a flagged turn says near its first hit, for the operator's eyes: one line. The text is
+// hostile by definition, so none of it is passed on as it is. A control character or a
+// character outside ASCII becomes one dot, so hidden and direction-reversing characters cannot
+// act where the line is shown. Runs of white space become one space. The three characters that
+// notification markup reads are escaped, so the text cannot draw a link or load an image.
+// hit is the byte offset of the first hit, or negative: the line then starts with the text.
+static void excerpt(char *out, size_t cap, const unsigned char *text, size_t len, long long hit) {
+    enum { BACK = 60, SHOWN = 280 };
+    size_t from = hit > 0 ? (size_t) hit : 0;
+    from = from < len ? from : len;
+    const size_t stop = from > BACK ? from - BACK : 0; // back to the start of the line, at most BACK bytes
+    while (from > stop && text[from - 1] != '\n') {
+        from--;
+    }
+    size_t o = 0, shown = 0, i = from;
+    int    space = 1; // white space at the start is dropped
+    out[0] = 0;
+    if (from > 0 && text[from - 1] != '\n') {
+        o = (size_t) snprintf(out, cap, "...");
+    }
+    for (; i < len && shown < SHOWN; i++) {
+        const unsigned char c = text[i];
+        if ((c & 0xC0) == 0x80) {
+            continue; // a later byte of a character that was shown as one dot
+        }
+        const int white = c == ' ' || c == '\t' || c == '\n' || c == '\r';
+        if (white && space) {
+            continue;
+        }
+        space = white;
+        const char one[2] = {(char) c, 0};
+        const char *s = white ? " " : c < 0x20 || c >= 0x7f ? "." : c == '&' ? "&amp;" : c == '<' ? "&lt;" : c == '>' ? "&gt;" : one;
+        const size_t n = strlen(s);
+        if (o + n + 4 > cap) {
+            break;
+        }
+        memcpy(out + o, s, n + 1);
+        o += n;
+        shown++;
+    }
+    if (i < len && o + 4 <= cap) {
+        memcpy(out + o, "...", 4);
+    }
+}
+
 static void scan_turn(const char *harness, const char *sess_name, const char *file, int min_score, FILE *alerts, scan_out *o) {
     char role[32];
     if (!turn_role(file, role)) {
@@ -673,7 +723,6 @@ static void scan_turn(const char *harness, const char *sess_name, const char *fi
         xr_fire(&res, XR_I001, 0);
         res.offset = -1;
     }
-    free(buf);
 
     o->files++;
     o->bytes += (long long) len;
@@ -714,10 +763,12 @@ static void scan_turn(const char *harness, const char *sess_name, const char *fi
             safe_copy(id, sizeof id, sess_name);
             o->top_score = res.score;
             snprintf(o->top, sizeof o->top, "%s %s %s", h, id, ids);
+            excerpt(o->top_text, sizeof o->top_text, buf + head, len - head, res.offset);
         }
     } else if (res.score > 0) {
         bump(1, "below.%s", harness);
     }
+    free(buf);
 }
 
 typedef void (*turn_fn)(const char *harness, const char *session, const char *file, void *ctx);
@@ -969,7 +1020,11 @@ static void scan_once(int min_score, scan_out *o) {
     for (size_t i = 0; i < l.n; i++) {
         const turn_ref *t   = &l.t[i];
         char           *key = sfmt("%s/%s/%s", t->harness, t->sess, t->file);
+        const long long before = o->alerts;
         scan_turn(t->harness, t->sess, t->file, min_score, alerts, o);
+        if (o->alerts != before) {
+            fflush(alerts); // an alert is on disk before its turn is listed as read: the hook relies on that order
+        }
         fprintf(seen, "%s\n", key);
         seen_add(fnv1a(key));
         free(key);
@@ -998,14 +1053,21 @@ static void scan_once(int min_score, scan_out *o) {
     save_state();
 }
 
-// a desktop notification and the terminal bell; the text holds ids only, never turn content
-static void notify(const scan_out *o) {
+// A desktop notification and the terminal bell. The first line holds ids only. With with_text
+// the second line is what the highest alert says near its first hit, as excerpt() left it:
+// that goes to the operator's screen and to nothing else. "--" ends the options, so no part of
+// the text can be read as one.
+static void notify(const scan_out *o, int with_text) {
     fputc('\a', stderr);
-    char body[320];
-    snprintf(body, sizeof body, "%lld new alert%s. Highest score %d: %s", o->alerts, o->alerts == 1 ? "" : "s", o->top_score, o->top);
+    char body[sizeof o->top + sizeof o->top_text + 96];
+    snprintf(body, sizeof body, "%lld new alert%s. Highest score %d: %s%s%s", o->alerts, o->alerts == 1 ? "" : "s", o->top_score, o->top,
+             with_text && o->top_text[0] ? "\n" : "", with_text ? o->top_text : "");
     const pid_t pid = fork();
     if (pid == 0) {
-        execlp("notify-send", "notify-send", "-a", "xks-id", "-u", o->top_score >= SCORE_HIGH ? "critical" : "normal",
+        sigset_t none; // the child does not inherit the engine's held-back signal
+        sigemptyset(&none);
+        sigprocmask(SIG_SETMASK, &none, NULL);
+        execlp("notify-send", "notify-send", "-a", "xks-id", "-u", o->top_score >= SCORE_HIGH ? "critical" : "normal", "--",
                "xks-id: possible prompt injection", body, (char *) NULL);
         _exit(127);
     }
@@ -1014,15 +1076,22 @@ static void notify(const scan_out *o) {
     }
 }
 
-static void lock_state(void) {
+// One scanner per state directory. The engine that keeps running ("watch") writes its process
+// id into the lock file: "xksid hook" sends that process SIGUSR1 to have the new turns read
+// now instead of at the next cycle (wait_for_verdict). A scan that runs once leaves the file
+// empty, since it does not wait for that signal and would be ended by it.
+static void lock_state(int watch) {
     char *path = sfmt("%s/lock", g_state);
-    FILE *f    = fopen(path, "w");
+    FILE *f    = fopen(path, "a"); // not "w": the file of a running engine is not emptied by a second one
     if (f == NULL) {
         die(path);
     }
     if (flock(fileno(f), LOCK_EX | LOCK_NB) != 0) {
         fprintf(stderr, "xksid: another xksid is scanning this state directory\n");
         exit(3);
+    }
+    if (ftruncate(fileno(f), 0) != 0 || (watch && fprintf(f, "%ld\n", (long) getpid()) < 0) || fflush(f) != 0) {
+        die(path);
     }
     free(path); // the handle stays open for the life of the process and holds the lock
 }
@@ -1133,6 +1202,153 @@ static int cmd_feedback(const char *rel) {
     return 0;
 }
 
+// ---- the stop of a turn. XKS-Memory writes a tool result to its turn file at the hook event
+// after the one that produced it, so the last results of a turn reach the disk during the
+// stop itself, while this hook already runs, and the engine has not read them. A stop that is
+// let through at that moment is let through unjudged. wait_for_verdict() holds the stop until
+// those files are written and the engine has read them. It waits only while an engine runs.
+
+static double wall(void) {
+    struct timespec ts;
+    clock_gettime(CLOCK_REALTIME, &ts);
+    return (double) ts.tv_sec + (double) ts.tv_nsec * 1e-9;
+}
+
+// The process id of the engine that keeps running, 0 if there is none to signal. The id in
+// the lock file may have outlived its process and belong to another by now, and SIGUSR1 ends
+// a process that does not expect it: only an xksid started as "watch" is taken.
+static pid_t engine_pid(void) {
+    char *path = sfmt("%s/lock", g_state);
+    FILE *f    = fopen(path, "r");
+    long  pid  = 0;
+    free(path);
+    if (f != NULL) {
+        pid = fscanf(f, "%ld", &pid) == 1 ? pid : 0;
+        fclose(f);
+    }
+    if (pid <= 1) {
+        return 0;
+    }
+    char   args[512] = ""; // the arguments of that process, each ended by a zero byte
+    size_t n         = 0;
+    path = sfmt("/proc/%ld/cmdline", pid);
+    f    = fopen(path, "r");
+    free(path);
+    if (f != NULL) {
+        n = fread(args, 1, sizeof args - 2, f);
+        fclose(f);
+    }
+    const size_t first = strlen(args);
+    const char  *name  = strrchr(args, '/');
+    name = name ? name + 1 : args;
+    return first + 1 < n && strcmp(name, "xksid") == 0 && strcmp(args + first + 1, "watch") == 0 ? (pid_t) pid : 0;
+}
+
+// The directory XKS-Memory keeps for a session id, ROOT/HARNESS/DATE_TIME_ID: the newest one
+// if the id has several. Returns 0 if there is none.
+static int find_session(const char *sid, char harness[64], char sess[160]) {
+    const size_t sl   = strlen(sid);
+    DIR         *root = opendir(g_root);
+    sess[0] = 0;
+    for (struct dirent *h; root != NULL && (h = readdir(root)) != NULL;) {
+        if (h->d_name[0] == '.') {
+            continue;
+        }
+        char *hpath = sfmt("%s/%s", g_root, h->d_name);
+        DIR  *hdir  = is_dir(hpath) ? opendir(hpath) : NULL;
+        for (struct dirent *s; hdir != NULL && (s = readdir(hdir)) != NULL;) {
+            const size_t n = strlen(s->d_name);
+            if (n >= sl && n < 160 && strcmp(s->d_name + n - sl, sid) == 0 && (n == sl || s->d_name[n - sl - 1] == '_') &&
+                strcmp(s->d_name, sess) > 0) {
+                snprintf(harness, 64, "%.63s", h->d_name);
+                snprintf(sess, 160, "%s", s->d_name);
+            }
+        }
+        if (hdir != NULL) {
+            closedir(hdir);
+        }
+        free(hpath);
+    }
+    if (root != NULL) {
+        closedir(root);
+    }
+    return sess[0] != 0;
+}
+
+// the lines the engine has added to seen.txt since the last call
+static void take_read(FILE *seen) {
+    char line[512];
+    clearerr(seen);
+    for (long at = ftell(seen); fgets(line, sizeof line, seen) != NULL; at = ftell(seen)) {
+        const size_t n = strlen(line);
+        if (n == 0 || line[n - 1] != '\n') {
+            fseek(seen, at, SEEK_SET); // a line the engine is still writing
+            break;
+        }
+        line[n - 1] = 0;
+        seen_add(fnv1a(line));
+    }
+}
+
+// 1 if the engine has read every turn file of the directory
+static int all_read(const char *dir, const char *harness, const char *sess) {
+    DIR *d   = opendir(dir);
+    int  all = 1;
+    for (struct dirent *t; d != NULL && all && (t = readdir(d)) != NULL;) {
+        const size_t n = strlen(t->d_name);
+        if (n >= 4 && strcmp(t->d_name + n - 3, ".md") == 0 && strcmp(t->d_name, "session.md") != 0) {
+            char  *key = sfmt("%s/%s/%s", harness, sess, t->d_name);
+            size_t slot;
+            all = g_seen_cap != 0 && seen_find(fnv1a(key), &slot);
+            free(key);
+        }
+    }
+    if (d != NULL) {
+        closedir(d);
+    }
+    return all;
+}
+
+static void wait_for_verdict(const char *sid) {
+    static const double PATIENCE = 1.0;  // s for XKS-Memory to begin writing; it took 0.22 s when measured
+    static const double RECENT   = 0.25; // a write this long before the stop counts as part of it
+    static const double QUIET    = 0.03; // s without a new file: its files of one stop came 1 to 5 ms apart
+    static const double LIMIT    = 3.0;  // s in all; the harness gives the hook 5
+    const pid_t engine = engine_pid();
+    char        harness[64], sess[160];
+    if (engine == 0 || !find_session(sid, harness, sess)) {
+        return;
+    }
+    char *dir  = sfmt("%s/%s/%s", g_root, harness, sess), *path = sfmt("%s/seen.txt", g_state);
+    FILE *seen = fopen(path, "r");
+    free(path);
+    const double t0     = wall();
+    double       judged = 0; // the state of the directory the engine was last asked to read
+    for (struct stat st; seen != NULL && stat(dir, &st) == 0;) {
+        const double now = wall(), written = (double) st.st_mtim.tv_sec + (double) st.st_mtim.tv_nsec * 1e-9;
+        if (written < t0 - RECENT) { // nothing of this stop is on disk yet
+            if (now - t0 > PATIENCE) {
+                break;
+            }
+        } else if (now - written >= QUIET) {
+            if (written != judged) {
+                kill(engine, SIGUSR1);
+                judged = written;
+            }
+            take_read(seen);
+            if (all_read(dir, harness, sess) || now - t0 > LIMIT) {
+                break;
+            }
+        }
+        const struct timespec step = {0, 5000000};
+        nanosleep(&step, NULL);
+    }
+    if (seen != NULL) {
+        fclose(seen);
+    }
+    free(dir);
+}
+
 // ---- hook: tells the observed model which turns of its own session were flagged, so it can
 // correct itself. Run by the harness; it detects nothing itself and only reads our state.
 
@@ -1186,6 +1402,10 @@ static int cmd_hook(const char *session_arg, const char *event_arg) {
     const size_t sl = strlen(sid);
     if (sl == 0) {
         return 0;
+    }
+
+    if (strcmp(event, "Stop") == 0) {
+        wait_for_verdict(sid);
     }
 
     // the alerts of this session the model has not been told about yet
@@ -1303,7 +1523,7 @@ static int cmd_tokens(int n, char **args) {
 static int usage(void) {
     fprintf(stderr,
             "usage: xksid scan      [--min-score N]          read the new turns once\n"
-            "       xksid watch     [--min-score N] [--interval S] [--notify]\n"
+            "       xksid watch     [--min-score N] [--interval S] [--notify | --notify-ids]\n"
             "                                                keep reading, all day; report new alerts\n"
             "       xksid status                             paths, decision vectors, counters\n"
             "       xksid rules                              the rules and their weights\n"
@@ -1342,7 +1562,9 @@ int main(int argc, char **argv) {
         } else if (strcmp(argv[i], "--event") == 0 && i + 1 < argc) {
             event = argv[++i];
         } else if (strcmp(argv[i], "--notify") == 0) {
-            do_notify = 1;
+            do_notify = 1; // with what the turn says
+        } else if (strcmp(argv[i], "--notify-ids") == 0) {
+            do_notify = 2; // ids only
         } else if (argv[i][0] != '-' && arg == NULL) {
             arg = argv[i];
         } else {
@@ -1411,7 +1633,13 @@ int main(int argc, char **argv) {
     if (!watch && strcmp(cmd, "scan") != 0) {
         return usage();
     }
-    lock_state();
+    sigset_t poke; // SIGUSR1 is held back and taken only between two cycles
+    sigemptyset(&poke);
+    sigaddset(&poke, SIGUSR1);
+    if (watch) {
+        sigprocmask(SIG_BLOCK, &poke, NULL);
+    }
+    lock_state(watch);
     load_state();
     scan_out o;
     do {
@@ -1421,10 +1649,12 @@ int main(int argc, char **argv) {
         }
         fflush(stdout);
         if (watch && o.alerts > 0 && do_notify) {
-            notify(&o);
+            notify(&o, do_notify == 1);
         }
         if (watch) {
-            sleep((unsigned) interval);
+            // the pause between two cycles ends early when "xksid hook" asks for a cycle now
+            const struct timespec pause = {interval > 0 ? interval : 1, 0};
+            sigtimedwait(&poke, NULL, &pause);
         }
     } while (watch);
     return 0;
